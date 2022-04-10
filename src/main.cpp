@@ -533,7 +533,6 @@ void do_send(osjob_t *j)
     //   gps.hdop.age() < 2000 &&
     //   gps.altitude.isValid() && 
     //   gps.altitude.age() < 2000 )
-    // 00 01 52 26    82 7F 4A 42    6E 5A F5 40   00 00 00 00    41 B7 97 3D    00 00 00 00
     if (gps.location.isValid())
     {
       double lat = gps.location.lat();
@@ -541,6 +540,8 @@ void do_send(osjob_t *j)
       double alt = gps.altitude.meters();
       double kmph = gps.speed.kmph();
       uint32_t sats = gps.satellites.value();
+      log_d_ln(sats);
+      log_d_ln(alt);
 
       byte buffer[24];
       buffer[0] = 0x00;

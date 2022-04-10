@@ -189,17 +189,28 @@ avrdude -F -v -c arduino -p atmega328p -P COM4 -b 57600 -D -U flash:w:firmware_1
 ## TTS Payload Formatter (formerly TTN Payload Decoder)
 
 ```javascript
+function toFloat(byte0, byte1, byte2, byte3) {
+  var data = new Uint8Array(4);
+  data[0] = byte0;
+  data[1] = byte1;
+  data[2] = byte2;
+  data[3] = byte3;
+  var f32 = new Float32Array(data.buffer);
+  var f32value = f32[0];
+  return f32value;
+}
+
 function decodeUplink(input) {
   var bytes = input.bytes;
 
   var bat = (bytes[1] << 8) | bytes[2]; // Battery
   var fwversion = (bytes[3] >> 4) + "." + (bytes[3] & 0xf); // Firmware version
-  var lat = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
-  var lon = (bytes[8] << 24) | (bytes[9] << 16) | (bytes[10] << 8) | bytes[11];
-  var alt = (bytes[12] << 24) | (bytes[13] << 16) | (bytes[14] << 8) | bytes[15];
-  var kmph = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+  var lat = toFloat(bytes[4], bytes[5], bytes[6], bytes[7]);
+  var lon = toFloat(bytes[8], bytes[9], bytes[10], bytes[11]);
+  var alt = toFloat(bytes[12], bytes[13], bytes[14], bytes[15]);
+  var kmph = toFloat(bytes[16], bytes[17], bytes[18], bytes[19]);
   var sattelites = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
-
+  
   return {
     data: {
       fwversion: fwversion,
