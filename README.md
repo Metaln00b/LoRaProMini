@@ -192,43 +192,23 @@ avrdude -F -v -c arduino -p atmega328p -P COM4 -b 57600 -D -U flash:w:firmware_1
 function decodeUplink(input) {
   var bytes = input.bytes;
 
-  var itrTrigger = (bytes[0] & 0x1) !== 0; // Message was triggered from interrupt (bit 0)
-  var itr0 = (bytes[0] & 0x2) !== 0; // Interrupt 0 (bit 1)
-  var itr1 = (bytes[0] & 0x4) !== 0; // Interrupt 1 (bit 2)
   var bat = (bytes[1] << 8) | bytes[2]; // Battery
   var fwversion = (bytes[3] >> 4) + "." + (bytes[3] & 0xf); // Firmware version
-  var temp1 = (bytes[4] & 0x80 ? 0xffff << 16 : 0) | (bytes[4] << 8) | bytes[5]; // BME Temperature
-  var humi1 = (bytes[6] << 8) | bytes[7]; // BME Humidity
-  var press1 = (bytes[8] << 8) | bytes[9]; // BME Pressure
-  var temp2 =
-    (bytes[10] & 0x80 ? 0xffff << 16 : 0) | (bytes[10] << 8) | bytes[11]; // DS18x Temperature
-
-  var mbStatus = "UNKNOWN";
-  if (itr0) {
-    mbStatus = "FULL";
-  } else if (itr1) {
-    mbStatus = "EMPTY";
-  }
+  var lat = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
+  var lon = (bytes[8] << 24) | (bytes[9] << 16) | (bytes[10] << 8) | bytes[11];
+  var alt = (bytes[12] << 24) | (bytes[13] << 16) | (bytes[14] << 8) | bytes[15];
+  var kmph = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+  var sattelites = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
 
   return {
     data: {
-      interrupts: {
-        itr0: itr0,
-        itr1: itr1,
-        itrTrigger: itrTrigger,
-      },
-      extra: {
-        mbStatus: mbStatus,
-        mbChanged: itrTrigger,
-      },
       fwversion: fwversion,
-      bme: {
-        temperature: temp1 / 100,
-        humidity: humi1 / 100,
-        pressure: press1,
-      },
-      ds18x: {
-        temperature: temp2 / 100,
+      gps: {
+        latitude: lat,
+        longitude: lon,
+        altitude: alt,
+        kmph: kmph,
+        sattelites: sattelites
       },
       battery: bat / 100,
     },

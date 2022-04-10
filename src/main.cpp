@@ -145,7 +145,9 @@ typedef struct
   u1_t APPKEY[16]; // 16 byte - AppSKey, application session key in big-endian format (aka msb).
 
 } configData_t;
-configData_t cfg; // Instance 'cfg' is a global variable with 'configData_t' structure now
+configData_t cfg; // Instance 'cfg' is a global variable with 'configData_t' structure nowlong nextPacketTime;
+
+long nextPacketTime;
 
 unsigned long prepareCount = 0;
 
@@ -231,6 +233,19 @@ void printHex(byte buffer[], size_t arraySize)
       Serial.write(48); // 0
     Serial.print(c, HEX);
   }
+}
+
+void float2Bytes(float val, byte* bytes_array)
+{
+  // Create union of shared memory space
+  union {
+    float float_variable;
+    byte temp_array[4];
+  } u;
+  // Overite bytes of union with float variable
+  u.float_variable = val;
+  // Assign bytes to input array
+  memcpy(bytes_array, u.temp_array, 4);
 }
 
 void readConfig()
@@ -500,15 +515,7 @@ void do_send(osjob_t *j)
     // Battery
     bat = readBat() * 100;
 
-    // Signed 16 bits integer, -32,768 up to +32,767
-    int16_t temp1 = -127 * 100;
-    int16_t temp2 = -127 * 100;
-
-    // Unsigned 16 bits integer, 0 up to 65,535
-    uint16_t sattelites = 1;
-    uint16_t press1 = 0;
-
-    int previousMillis = millis();
+    unsigned long previousMillis = millis();
 
     while((previousMillis + 1000) > millis())
     {
@@ -519,29 +526,36 @@ void do_send(osjob_t *j)
         }
     }
 
-    if (gps.location.isValid() && 
-      gps.location.age() < 2000 &&
-      gps.hdop.isValid() &&
-      gps.hdop.value() <= 300 &&
-      gps.hdop.age() < 2000 &&
-      gps.altitude.isValid() && 
-      gps.altitude.age() < 2000 )
+    // if (gps.location.isValid() && 
+    //   gps.location.age() < 2000 &&
+    //   gps.hdop.isValid() &&
+    //   gps.hdop.value() <= 300 &&
+    //   gps.hdop.age() < 2000 &&
+    //   gps.altitude.isValid() && 
+    //   gps.altitude.age() < 2000 )
+    // 00 01 52 26    82 7F 4A 42    6E 5A F5 40   00 00 00 00    41 B7 97 3D    00 00 00 00
+    if (gps.location.isValid())
     {
-      sattelites = gps.satellites.value();
+      double lat = gps.location.lat();
+      double lon = gps.location.lng();
+      double alt = gps.altitude.meters();
+      double kmph = gps.speed.kmph();
+      uint32_t sats = gps.satellites.value();
 
-      byte buffer[12];
+      byte buffer[24];
       buffer[0] = 0x00;
       buffer[1] = bat >> 8;
       buffer[2] = bat;
       buffer[3] = (VERSION_MAJOR << 4) | (VERSION_MINOR & 0xf);
-      buffer[4] = temp1 >> 8;
-      buffer[5] = temp1;
-      buffer[6] = sattelites >> 8;
-      buffer[7] = sattelites;
-      buffer[8] = press1 >> 8;
-      buffer[9] = press1;
-      buffer[10] = temp2 >> 8;
-      buffer[11] = temp2;
+
+      float2Bytes(lat, &buffer[4]); // 4-7
+      float2Bytes(lon, &buffer[8]); // 8-11
+      float2Bytes(alt, &buffer[12]); // 12-15
+      float2Bytes(kmph, &buffer[16]); // 16-19
+      buffer[20] = sats >> 24;
+      buffer[21] = sats >> 16;
+      buffer[22] = sats >> 8;
+      buffer[23] = sats;
 
       log_d("Prepare pck #");
       log_d_ln(++prepareCount);
@@ -673,6 +687,7 @@ void onEvent(ev_t ev)
     case EV_JOINING:
       log_d_ln(F("Joining..."));
       break;
+
     case EV_JOINED:
       log_d_ln(F("Joined!"));
 
@@ -704,10 +719,12 @@ void onEvent(ev_t ev)
         os_setTimedCallback(&sendjob, os_getTime() + ms2osticks(10), do_send);
       }
       break;
+
     case EV_JOIN_FAILED:
       log_d_ln(F("Join failed"));
       lmicStartup(); // Reset LMIC and retry
       break;
+
     case EV_REJOIN_FAILED:
       log_d_ln(F("Rejoin failed"));
       lmicStartup(); // Reset LMIC and retry
@@ -716,35 +733,23 @@ void onEvent(ev_t ev)
     case EV_TXSTART:
       // log_d_ln(F("EV_TXSTART"));
       break;
+
     case EV_TXCOMPLETE:
       log_d(F("TX done #")); // (includes waiting for RX windows)
       log_d_ln(LMIC.seqnoUp);
       if (LMIC.txrxFlags & TXRX_ACK)
+      {
         log_d_ln(F("> Got ack"));
+      }
       if (LMIC.txrxFlags & TXRX_NACK)
+      {
         log_d_ln(F("> Got NO ack"));
-      long nextPacketTime = (gps.speed.kmph() > MOVING_KMPH ? SHORT_TX_INTERVAL : TX_INTERVAL); // depend on current GPS speed
+      }
+      nextPacketTime = (gps.speed.kmph() > MOVING_KMPH ? SHORT_TX_INTERVAL : TX_INTERVAL); // depend on current GPS speed
       os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(nextPacketTime), do_send);
       log_d(F("Next in "));
       log_d(nextPacketTime);
       log_d_ln(F("s"));
-      // if (LMIC.dataLen)
-      // {
-
-      //   log_d(F("> Received "));
-      //   log_d(LMIC.dataLen);
-      //   log_d(F(" bytes of payload: "));
-      //   for (int i = 0; i < LMIC.dataLen; i++)
-      //   {
-      //     if (LMIC.frame[LMIC.dataBeg + i] < 0x10)
-      //     {
-      //       log_d(F("0"));
-      //     }
-      //     log_d(LMIC.frame[LMIC.dataBeg + i], HEX);
-      //     log_d(" ");
-      //   }
-      //   log_d_ln();
-      // }
       break;
 
     case EV_JOIN_TXCOMPLETE:
@@ -754,6 +759,7 @@ void onEvent(ev_t ev)
     case EV_TXCANCELED:
       log_d_ln(F("TX canceled!"));
       break;
+
     case EV_BEACON_FOUND:
     case EV_BEACON_MISSED:
     case EV_BEACON_TRACKED:
