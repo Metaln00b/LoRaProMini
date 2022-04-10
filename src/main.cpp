@@ -5,10 +5,10 @@
 #include <Wire.h>
 #include <LowPower.h>
 #include <OneWire.h>
-#include <TinyDallas.h>
-#include <TinyBME.h>
 #include <EEPROM.h>
 #include <CRC32.h>
+#include <TinyGPSPlus.h>
+#include <SoftwareSerial.h>
 
 // ++++++++++++++++++++++++++++++++++++++++
 //
@@ -49,6 +49,16 @@
 // LORA MAX RANDOM SEND DELAY
 #define LORA_MAX_RANDOM_SEND_DELAY 20
 
+// GPS
+#define GPSBaud 38400
+#define GPS_RX 4
+#define GPS_TX 5
+#define TX_INTERVAL 120
+#define GPS_FIX_RETRY_DELAY 10 // wait this many seconds when no GPS fix is received to retry
+#define SHORT_TX_INTERVAL 20 // when driving, send packets every SHORT_TX_INTERVAL seconds
+#define MOVING_KMPH 5.0 // if speed in km/h is higher than MOVING_HMPH, we assume that car is moving
+
+
 // ++++++++++++++++++++++++++++++++++++++++
 //
 // LOGGING
@@ -74,11 +84,6 @@ const boolean LOG_DEBUG_ENABLED = false;
 // ++++++++++++++++++++++++++++++++++++++++
 
 OneWire oneWire(ONEWIREBUS);
-TinyDallas ds(&oneWire);
-TinyBME bme;
-
-// Dallas temp sensor(s)
-DeviceAddress dsSensor; // Holds later first sensor found at boot.
 
 // ++++++++++++++++++++++++++++++++++++++++
 //
@@ -142,15 +147,7 @@ typedef struct
 } configData_t;
 configData_t cfg; // Instance 'cfg' is a global variable with 'configData_t' structure now
 
-volatile boolean wakedFromISR0 = false;
-volatile boolean wakedFromISR1 = false;
-unsigned long lastPrintTime = 0;
 unsigned long prepareCount = 0;
-boolean TXCompleted = false;
-boolean foundBME = false; // BME Sensor found. To skip reading if no sensor is attached
-boolean foundDS = false;  // DS19x Sensor found. To skip reading if no sensor is attached
-byte pinState = 0x0;
-boolean doSend = false;
 
 // These callbacks are used in over-the-air activation
 void os_getArtEui(u1_t *buf)
@@ -172,22 +169,15 @@ void os_getDevKey(u1_t *buf)
 //
 // ++++++++++++++++++++++++++++++++++++++++
 
+SoftwareSerial serial(GPS_RX, GPS_TX); // RX, TX
+TinyGPSPlus gps;
+
 void clearSerialBuffer()
 {
   while (Serial.available())
   {
     Serial.read();
   }
-}
-
-void wakeUp0()
-{
-  wakedFromISR0 = true;
-}
-
-void wakeUp1()
-{
-  wakedFromISR1 = true;
 }
 
 float readBat()
@@ -515,71 +505,75 @@ void do_send(osjob_t *j)
     int16_t temp2 = -127 * 100;
 
     // Unsigned 16 bits integer, 0 up to 65,535
-    uint16_t humi1 = 0;
+    uint16_t sattelites = 1;
     uint16_t press1 = 0;
 
-    // Read sensor values von BME280
-    // and multiply by 100 to effectively keep 2 decimals
-    if (foundBME)
+    int previousMillis = millis();
+
+    while((previousMillis + 1000) > millis())
     {
-      bme.takeForcedMeasurement();
-      temp1 = bme.readTemperature() * 100;
-      humi1 = bme.readHumidity() * 100;
-      press1 = bme.readPressure() / 100.0F; // p [300..1100]
+        while (serial.available() )
+        {
+            char data = serial.read();
+            gps.encode(data);
+        }
     }
 
-    // Read sensor value form 1-Wire sensor
-    // and multiply by 100 to effectively keep 2 decimals
-    if (foundDS)
+    if (gps.location.isValid() && 
+      gps.location.age() < 2000 &&
+      gps.hdop.isValid() &&
+      gps.hdop.value() <= 300 &&
+      gps.hdop.age() < 2000 &&
+      gps.altitude.isValid() && 
+      gps.altitude.age() < 2000 )
     {
-      ds.requestTemperatures(); // Send the command to get temperatures
-      temp2 = ds.getTempC(dsSensor) * 100;
+      sattelites = gps.satellites.value();
+
+      byte buffer[12];
+      buffer[0] = 0x00;
+      buffer[1] = bat >> 8;
+      buffer[2] = bat;
+      buffer[3] = (VERSION_MAJOR << 4) | (VERSION_MINOR & 0xf);
+      buffer[4] = temp1 >> 8;
+      buffer[5] = temp1;
+      buffer[6] = sattelites >> 8;
+      buffer[7] = sattelites;
+      buffer[8] = press1 >> 8;
+      buffer[9] = press1;
+      buffer[10] = temp2 >> 8;
+      buffer[11] = temp2;
+
+      log_d("Prepare pck #");
+      log_d_ln(++prepareCount);
+      // log_d(F("> FW: v"));
+      // log_d(VERSION_MAJOR);
+      // log_d(F("."));
+      // log_d(VERSION_MINOR);
+      // log_d(F("> Batt: "));
+      // log_d_ln(bat);
+      // log_d(F("> Pins: "));
+      // log_d_ln(buffer[0], BIN);
+      // log_d(F("> BME Temp: "));
+      // log_d_ln(temp1);
+      // log_d(F("> BME Humi: "));
+      // log_d_ln(humi1);
+      // log_d(F("> BME Pres: "));
+      // log_d_ln(press1);
+      // log_d(F("> DS18x Temp: "));
+      // log_d_ln(temp2);
+      log_d(F("> Payload: "));
+      logHex_d(buffer, sizeof(buffer));
+      log_d_ln();
+
+      // Prepare upstream data transmission at the next possible time.
+      LMIC_setTxData2(1, buffer, sizeof(buffer), cfg.CONFIRMED_DATA_UP);
+      log_d_ln(F("Pck queued"));
     }
-
-    byte buffer[12];
-    buffer[0] = pinState;
-    buffer[1] = bat >> 8;
-    buffer[2] = bat;
-    buffer[3] = (VERSION_MAJOR << 4) | (VERSION_MINOR & 0xf);
-    buffer[4] = temp1 >> 8;
-    buffer[5] = temp1;
-    buffer[6] = humi1 >> 8;
-    buffer[7] = humi1;
-    buffer[8] = press1 >> 8;
-    buffer[9] = press1;
-    buffer[10] = temp2 >> 8;
-    buffer[11] = temp2;
-
-    log_d("Prepare pck #");
-    log_d_ln(++prepareCount);
-    // log_d(F("> FW: v"));
-    // log_d(VERSION_MAJOR);
-    // log_d(F("."));
-    // log_d(VERSION_MINOR);
-    // log_d(F("> Batt: "));
-    // log_d_ln(bat);
-    // log_d(F("> Pins: "));
-    // log_d_ln(buffer[0], BIN);
-    // log_d(F("> BME Temp: "));
-    // log_d_ln(temp1);
-    // log_d(F("> BME Humi: "));
-    // log_d_ln(humi1);
-    // log_d(F("> BME Pres: "));
-    // log_d_ln(press1);
-    // log_d(F("> DS18x Temp: "));
-    // log_d_ln(temp2);
-    log_d(F("> Payload: "));
-    logHex_d(buffer, sizeof(buffer));
-    log_d_ln();
-
-    // Print first debug messages in loop immediately
-    lastPrintTime = 0;
-
-    TXCompleted = false;
-
-    // Prepare upstream data transmission at the next possible time.
-    LMIC_setTxData2(1, buffer, sizeof(buffer), cfg.CONFIRMED_DATA_UP);
-    log_d_ln(F("Pck queued"));
+    else
+    {
+      log_d_ln(F("No GPS fix"));
+      os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(GPS_FIX_RETRY_DELAY), do_send);
+    }
   }
 }
 
@@ -672,282 +666,111 @@ void lmicStartup()
   // #endif
 }
 
-void do_sleep(uint16_t sleepTime)
-{
-  boolean breaksleep = false;
-
-  if (LOG_DEBUG_ENABLED)
-  {
-    Serial.print(F("Sleep "));
-    if (sleepTime <= 0)
-    {
-      Serial.println(F("FOREVER\n"));
-    }
-    else
-    {
-      Serial.print(sleepTime);
-      Serial.println(F("s\n"));
-    }
-    Serial.flush();
-  }
-
-  // sleep logic using LowPower library
-  if (sleepTime <= 0)
-  {
-    LowPower.powerDown(SLEEP_FOREVER, ADC_OFF, BOD_OFF);
-  }
-  else
-  {
-
-    // Add LORA_MAX_RANDOM_SEND_DELAY of randomness to avoid overlapping of different
-    // nodes with exactly the same sende interval
-    sleepTime += (rand() % LORA_MAX_RANDOM_SEND_DELAY);
-
-    // Measurements show that the timer is off by about 12 percent,
-    // so the sleep time is shortened by this value.
-    sleepTime *= 0.88;
-
-    // sleep logic using LowPower library
-    uint16_t delays[] = {8, 4, 2, 1};
-    period_t sleeptimes[] = {SLEEP_8S, SLEEP_4S, SLEEP_2S, SLEEP_1S};
-    breaksleep = false;
-
-    for (uint8_t i = 0; (i <= 3 && !breaksleep); i++)
-    {
-      for (uint16_t x = sleepTime; (x >= delays[i] && !breaksleep); x -= delays[i])
-      {
-        // Serial.print("i: ");
-        // Serial.print(i);
-        // Serial.print(" TL: ");
-        // Serial.print(sleepTime);
-        // Serial.print(" S: ");
-        // Serial.println(delays[i]);
-        // Serial.flush();
-        LowPower.powerDown(sleeptimes[i], ADC_OFF, BOD_OFF);
-        if (wakedFromISR0 || wakedFromISR1)
-        {
-          breaksleep = true;
-        }
-        else
-        {
-          sleepTime -= delays[i];
-        }
-      }
-    }
-  }
-
-  // LMIC does not get that the MCU is sleeping and the
-  // duty cycle limitation then provides a delay.
-  // Reset duty cycle limitation to fix that.
-  LMIC.bands[BAND_MILLI].avail =
-      LMIC.bands[BAND_CENTI].avail =
-          LMIC.bands[BAND_DECI].avail = os_getTime();
-
-  // ++++++++++++++++++++++++++++++++++++++++++++++++++ //
-  // If that still not work, here a some other things to checkout:
-  //
-  // https://www.thethingsnetwork.org/forum/t/adafruit-feather-32u4-lora-long-transmission-time-after-deep-sleep/11678/11
-  // extern volatile unsigned long timer0_overflow_count;
-  // cli();
-  // timer0_overflow_count += 8 * 64 * clockCyclesPerMicrosecond();
-  // sei();
-  //
-  // https://www.thethingsnetwork.org/forum/t/lmic-sleeping-and-duty-cycle/15471/2
-  // https://github.com/matthijskooijman/arduino-lmic/issues/109
-  // https://github.com/matthijskooijman/arduino-lmic/issues/121
-  //
-  // https://www.thethingsnetwork.org/forum/t/modified-lmic-sleep-and-other-parameter/17027/3
-  //
-  // https://github.com/mcci-catena/arduino-lmic/issues/777
-  // LMIC.txend = 0;
-  // for (int i = 0; i < MAX_BANDS; i++)
-  // {
-  //   LMIC.bands[i].avail = 0;
-  // }
-  // LMIC.bands[BAND_MILLI].avail = 0;
-  // LMIC.bands[BAND_CENTI].avail = 0;
-  // LMIC.bands[BAND_DECI].avail = 0;
-  //
-  // https://github.com/matthijskooijman/arduino-lmic/issues/293
-  //
-  // os_radio(OP_TXDATA);
-  // LMIC.opmode = OP_TXDATA;
-  // LMIC_setTxData2(1, mydata, sizeof(mydata) - 1, 0);
-  //
-  // https://www.thethingsnetwork.org/forum/t/feather-m0-with-lmic-takes-more-than-2-minutes-to-transmit/41803/20?page=2
-  // https://gist.github.com/HeadBoffin/95eac7764d94ccde83af2503c1e24eb8
-  //
-  /// We don't just send here, give the os_runloop_once() a chance to run
-  // and we keep the State machine pure
-  //
-  // https://forum.arduino.cc/t/manipulation-of-millis-value/42855/4
-  //
-  // https://www.thethingsnetwork.org/forum/t/arduino-sx1276-with-lmic-library-on-arduino-ide-sleep-mode-problem/54692
-  // void PowerDownUpdateMicros()
-  // {
-  //   extern volatile unsigned long timer0_overflow_count;
-  //   PowerDown();
-  //   cli();
-  //   // LMIC uses micros() to keep track of the duty cycle, so
-  //   // hack timer0_overflow for a rude adjustment:
-  //   timer0_overflow_count += 8 * 64 * clockCyclesPerMicrosecond();
-  //   sei();
-  // }
-  // LMIC uses micros() to keep track of the duty cycle, so
-  // hack timer0_overflow for a rude adjustment:
-  // cli();
-  // timer0_overflow_count += 8 * 64 * clockCyclesPerMicrosecond();
-  // sei();
-}
-
 void onEvent(ev_t ev)
 {
   switch (ev)
   {
-  case EV_JOINING:
-    log_d_ln(F("Joining..."));
-    break;
-  case EV_JOINED:
-    log_d_ln(F("Joined!"));
+    case EV_JOINING:
+      log_d_ln(F("Joining..."));
+      break;
+    case EV_JOINED:
+      log_d_ln(F("Joined!"));
 
-    if (cfg.ACTIVATION_METHOD == OTAA)
-    {
-      //   u4_t netid = 0;
-      //   devaddr_t devaddr = 0;
-      //   u1_t nwkKey[16];
-      //   u1_t artKey[16];
-      //   LMIC_getSessionKeys(&netid, &devaddr, nwkKey, artKey);
-      //   log_d(F("> NetID: "));
-      //   log_d_ln(netid, DEC);
-      //   log_d(F("> DevAddr: ")); // (MSB)
-      //   log_d_ln(devaddr, HEX);
-      //   log_d(F("> AppSKey: ")); // (MSB)
-      //   logHex_d(artKey, sizeof(artKey));
+      if (cfg.ACTIVATION_METHOD == OTAA)
+      {
+        //   u4_t netid = 0;
+        //   devaddr_t devaddr = 0;
+        //   u1_t nwkKey[16];
+        //   u1_t artKey[16];
+        //   LMIC_getSessionKeys(&netid, &devaddr, nwkKey, artKey);
+        //   log_d(F("> NetID: "));
+        //   log_d_ln(netid, DEC);
+        //   log_d(F("> DevAddr: ")); // (MSB)
+        //   log_d_ln(devaddr, HEX);
+        //   log_d(F("> AppSKey: ")); // (MSB)
+        //   logHex_d(artKey, sizeof(artKey));
+        //   log_d_ln();
+        //   log_d(F("> NwkSKey: ")); // (MSB)
+        //   logHex_d(nwkKey, sizeof(nwkKey));
+        //   log_d_ln();
+        log_d_ln();
+
+        // Enable ADR explicit (default is alreay enabled)
+        LMIC_setAdrMode(1);
+        // enable link check validation
+        LMIC_setLinkCheckMode(1);
+
+        // Ok send our first data in 10 ms
+        os_setTimedCallback(&sendjob, os_getTime() + ms2osticks(10), do_send);
+      }
+      break;
+    case EV_JOIN_FAILED:
+      log_d_ln(F("Join failed"));
+      lmicStartup(); // Reset LMIC and retry
+      break;
+    case EV_REJOIN_FAILED:
+      log_d_ln(F("Rejoin failed"));
+      lmicStartup(); // Reset LMIC and retry
+      break;
+
+    case EV_TXSTART:
+      // log_d_ln(F("EV_TXSTART"));
+      break;
+    case EV_TXCOMPLETE:
+      log_d(F("TX done #")); // (includes waiting for RX windows)
+      log_d_ln(LMIC.seqnoUp);
+      if (LMIC.txrxFlags & TXRX_ACK)
+        log_d_ln(F("> Got ack"));
+      if (LMIC.txrxFlags & TXRX_NACK)
+        log_d_ln(F("> Got NO ack"));
+      long nextPacketTime = (gps.speed.kmph() > MOVING_KMPH ? SHORT_TX_INTERVAL : TX_INTERVAL); // depend on current GPS speed
+      os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(nextPacketTime), do_send);
+      log_d(F("Next in "));
+      log_d(nextPacketTime);
+      log_d_ln(F("s"));
+      // if (LMIC.dataLen)
+      // {
+
+      //   log_d(F("> Received "));
+      //   log_d(LMIC.dataLen);
+      //   log_d(F(" bytes of payload: "));
+      //   for (int i = 0; i < LMIC.dataLen; i++)
+      //   {
+      //     if (LMIC.frame[LMIC.dataBeg + i] < 0x10)
+      //     {
+      //       log_d(F("0"));
+      //     }
+      //     log_d(LMIC.frame[LMIC.dataBeg + i], HEX);
+      //     log_d(" ");
+      //   }
       //   log_d_ln();
-      //   log_d(F("> NwkSKey: ")); // (MSB)
-      //   logHex_d(nwkKey, sizeof(nwkKey));
-      //   log_d_ln();
-      log_d_ln();
+      // }
+      break;
 
-      // Enable ADR explicit (default is alreay enabled)
-      LMIC_setAdrMode(1);
-      // enable link check validation
-      LMIC_setLinkCheckMode(1);
+    case EV_JOIN_TXCOMPLETE:
+      log_d_ln(F("NO JoinAccept"));
+      break;
 
-      // Ok send our first data in 10 ms
-      os_setTimedCallback(&sendjob, os_getTime() + ms2osticks(10), do_send);
-    }
-    break;
-  case EV_JOIN_FAILED:
-    log_d_ln(F("Join failed"));
-    lmicStartup(); // Reset LMIC and retry
-    break;
-  case EV_REJOIN_FAILED:
-    log_d_ln(F("Rejoin failed"));
-    lmicStartup(); // Reset LMIC and retry
-    break;
+    case EV_TXCANCELED:
+      log_d_ln(F("TX canceled!"));
+      break;
+    case EV_BEACON_FOUND:
+    case EV_BEACON_MISSED:
+    case EV_BEACON_TRACKED:
+    case EV_RFU1:
+    case EV_LOST_TSYNC:
+    case EV_RESET:
+    case EV_RXCOMPLETE:
+    case EV_LINK_DEAD:
+    case EV_LINK_ALIVE:
+    case EV_SCAN_FOUND:
 
-  case EV_TXSTART:
-    // log_d_ln(F("EV_TXSTART"));
-    break;
-  case EV_TXCOMPLETE:
-    log_d(F("TX done #")); // (includes waiting for RX windows)
-    log_d_ln(LMIC.seqnoUp);
-    if (LMIC.txrxFlags & TXRX_ACK)
-      log_d_ln(F("> Got ack"));
-    if (LMIC.txrxFlags & TXRX_NACK)
-      log_d_ln(F("> Got NO ack"));
-
-    // if (LMIC.dataLen)
-    // {
-
-    //   log_d(F("> Received "));
-    //   log_d(LMIC.dataLen);
-    //   log_d(F(" bytes of payload: "));
-    //   for (int i = 0; i < LMIC.dataLen; i++)
-    //   {
-    //     if (LMIC.frame[LMIC.dataBeg + i] < 0x10)
-    //     {
-    //       log_d(F("0"));
-    //     }
-    //     log_d(LMIC.frame[LMIC.dataBeg + i], HEX);
-    //     log_d(" ");
-    //   }
-    //   log_d_ln();
-    // }
-
-    TXCompleted = true;
-    break;
-
-  case EV_JOIN_TXCOMPLETE:
-    log_d_ln(F("NO JoinAccept"));
-    break;
-
-  case EV_TXCANCELED:
-    log_d_ln(F("TX canceled!"));
-    break;
-  case EV_BEACON_FOUND:
-  case EV_BEACON_MISSED:
-  case EV_BEACON_TRACKED:
-  case EV_RFU1:
-  case EV_LOST_TSYNC:
-  case EV_RESET:
-  case EV_RXCOMPLETE:
-  case EV_LINK_DEAD:
-  case EV_LINK_ALIVE:
-  case EV_SCAN_FOUND:
-
-  case EV_RXSTART:
-  default:
-    log_d(F("Unknown Evt: "));
-    log_d_ln((unsigned)ev);
-    break;
+    case EV_RXSTART:
+    default:
+      log_d(F("Unknown Evt: "));
+      log_d_ln((unsigned)ev);
+      break;
   }
-}
-
-void handleISR()
-{
-  if (wakedFromISR0 || wakedFromISR1)
-  {
-    log_d(F("Waked from ItrPin "));
-    if (wakedFromISR0)
-    {
-      log_d_ln(F("0!"));
-      pinState |= STATE_ITR0;    // set bit in pinState byte to 1
-      pinState &= ~(STATE_ITR1); // set bit in pinState byte to 0
-    }
-
-    if (wakedFromISR1)
-    {
-      Serial.println(F("1!"));
-      pinState |= STATE_ITR1;    // set bit in pinState byte to 1
-      pinState &= ~(STATE_ITR0); // set bit in pinState byte to 0
-    }
-
-    // set STATE_ITR_EVT bit in pinState byte to 1
-    // this means this pin was set now
-    pinState |= STATE_ITR_TRIGGER;
-
-    // Remove data previously prepared for upstream transmission.
-    // If transmit messages are pending, the event EV_TXCOMPLETE will be reported.
-    if (!TXCompleted)
-    {
-      LMIC_clrTxData();
-    }
-
-    // send new data;
-    doSend = true;
-
-    wakedFromISR0 = false;
-    wakedFromISR1 = false;
-  }
-}
-
-void reset_itr_trigger_state()
-{
-  // set STATE_ITR_EVT bit in pinState byte to 0
-  // this means that the pin states was set previously
-  pinState &= ~(STATE_ITR_TRIGGER);
 }
 
 void setup()
@@ -964,6 +787,8 @@ void setup()
     Serial.begin(9600);
     delay(100); // per sample code on RF_95 test
   }
+  
+  serial.begin(GPSBaud);
 
   log_d(F("\n= Starting LoRaProMini v"));
   log_d(VERSION_MAJOR);
@@ -988,83 +813,6 @@ void setup()
       }
     }
   }
-
-  log_d(F("Search DS18x..."));
-
-  ds.begin();
-  ds.requestTemperatures();
-
-  log_d(ds.getDeviceCount(), DEC);
-  log_d_ln(F(" found"));
-
-  for (uint8_t i = 0; i < ds.getDeviceCount(); i++)
-  {
-    if (CONFIG_MODE_ENABLED)
-    {
-      Serial.print(F("> #"));
-      Serial.print(i);
-      Serial.print(F(": "));
-    }
-    DeviceAddress deviceAddress;
-    if (ds.getAddress(deviceAddress, i))
-    {
-      foundDS = true;
-
-      // Save first sensor as measurement sensor for later
-      if (i == 0)
-      {
-        memcpy(dsSensor, deviceAddress, sizeof(deviceAddress) / sizeof(*deviceAddress));
-      }
-
-      if (CONFIG_MODE_ENABLED)
-      {
-        printHex(deviceAddress, sizeof(deviceAddress));
-        Serial.print(" --> ");
-        uint8_t scratchPad[9];
-        ds.readScratchPad(deviceAddress, scratchPad);
-        printHex(scratchPad, sizeof(scratchPad));
-        Serial.print(" --> ");
-        Serial.print(ds.getTempC(deviceAddress));
-        Serial.print(" °C");
-        Serial.println();
-      }
-    }
-  }
-
-  // BME280 forced mode, 1x temperature / 1x humidity / 1x pressure oversampling, filter off
-  log_d(F("Search BME..."));
-  if (bme.begin(I2C_ADR_BME))
-  {
-    foundBME = true;
-    log_d_ln(F("1 found"));
-    if (CONFIG_MODE_ENABLED)
-    {
-      bme.takeForcedMeasurement();
-      Serial.print(F("> Temperatur: "));
-      Serial.print(bme.readTemperature());
-      Serial.println(" °C");
-      Serial.print(F("> Humidity: "));
-      Serial.print(bme.readHumidity());
-      Serial.println(" %RH");
-      Serial.print(F("> Pressure: "));
-      Serial.print(bme.readPressure() / 100.0F);
-      Serial.println(" hPa");
-    }
-  }
-  else
-  {
-    log_d_ln(F("0 found"));
-  }
-
-  // Allow wake up pin to trigger interrupt on low.
-  // https://www.arduino.cc/reference/en/language/functions/external-interrupts/attachinterrupt/
-  if (cfg.WAKEUP_BY_INTERRUPT_PINS == 1)
-  {
-    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN0), wakeUp0, RISING);
-    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN1), wakeUp1, RISING);
-  }
-  wakedFromISR0 = false;
-  wakedFromISR1 = false;
 
   // Start LoRa stuff if not in config mode
   if (!CONFIG_MODE_ENABLED)
@@ -1098,52 +846,12 @@ void setup()
 
 void loop()
 {
-
   if (CONFIG_MODE_ENABLED)
   {
     serialMenu();
   }
   else
   {
-
     os_runloop_once();
-
-    // Previous TX is complete and also no critical jobs pending in LMIC
-    if (TXCompleted)
-    {
-      // Going to sleep
-      boolean sleep = true;
-      while (sleep)
-      {
-        do_sleep(cfg.SLEEPTIME);
-        if (readBat() >= cfg.BAT_MIN_VOLTAGE)
-        {
-          sleep = false;
-        }
-        else
-        {
-          log_d_ln(F("Bat to low!"));
-        }
-      }
-
-      handleISR();
-
-      // sleep ended. do next transmission
-      doSend = true;
-    }
-    if (lastPrintTime == 0 || lastPrintTime + 1000 < millis())
-    {
-      log_d_ln(F("> Can't sleep"));
-      lastPrintTime = millis();
-    }
-
-    handleISR();
-
-    if (doSend)
-    {
-      doSend = false;
-      do_send(&sendjob);
-      reset_itr_trigger_state();
-    }
   }
 }
