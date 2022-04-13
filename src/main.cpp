@@ -50,7 +50,7 @@
 #define LORA_MAX_RANDOM_SEND_DELAY 20
 
 // GPS
-#define GPSBaud 38400
+#define GPSBaud 9600
 #define GPS_RX 4
 #define GPS_TX 5
 #define TX_INTERVAL 120
@@ -526,22 +526,20 @@ void do_send(osjob_t *j)
         }
     }
 
-    // if (gps.location.isValid() && 
-    //   gps.location.age() < 2000 &&
-    //   gps.hdop.isValid() &&
-    //   gps.hdop.value() <= 300 &&
-    //   gps.hdop.age() < 2000 &&
-    //   gps.altitude.isValid() && 
-    //   gps.altitude.age() < 2000 )
-    if (gps.location.isValid())
+    if (gps.location.isValid() && 
+      gps.location.age() < 2000 &&
+      gps.hdop.isValid() &&
+      gps.hdop.value() <= 300 &&
+      gps.hdop.age() < 2000 &&
+      gps.altitude.isValid() && 
+      gps.altitude.age() < 2000 )
+    //if (gps.location.isValid())
     {
       double lat = gps.location.lat();
       double lon = gps.location.lng();
       double alt = gps.altitude.meters();
       double kmph = gps.speed.kmph();
       uint32_t sats = gps.satellites.value();
-      log_d_ln(sats);
-      log_d_ln(alt);
 
       byte buffer[24];
       buffer[0] = 0x00;
@@ -796,6 +794,11 @@ void setup()
   }
   
   serial.begin(GPSBaud);
+  
+  serial.setTimeout(2);
+
+  byte CFG_RST[12] = {0xb5, 0x62, 0x06, 0x04, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0F, 0x66};
+  serial.write(CFG_RST, sizeof(CFG_RST)); // Soft Reset GPS on Start
 
   log_d(F("\n= Starting LoRaProMini v"));
   log_d(VERSION_MAJOR);
