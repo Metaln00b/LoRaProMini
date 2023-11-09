@@ -8,6 +8,7 @@
 #include <EEPROM.h>
 #include <CRC32.h>
 #include <TinyGPSPlus.h>
+#include <UbxGpsNavPvt.h>
 #include <SoftwareSerial.h>
 
 // ++++++++++++++++++++++++++++++++++++++++
@@ -50,7 +51,7 @@
 #define LORA_MAX_RANDOM_SEND_DELAY 20
 
 // GPS
-#define GPSBaud 9600
+#define GPSBaud 115200
 #define GPS_RX 4
 #define GPS_TX 5
 #define TX_INTERVAL 120
@@ -172,7 +173,8 @@ void os_getDevKey(u1_t *buf)
 // ++++++++++++++++++++++++++++++++++++++++
 
 SoftwareSerial serial(GPS_RX, GPS_TX); // RX, TX
-TinyGPSPlus gps;
+//TinyGPSPlus gps;
+UbxGpsNavPvt<SoftwareSerial> gps(serial);
 
 void clearSerialBuffer()
 {
@@ -515,31 +517,44 @@ void do_send(osjob_t *j)
     // Battery
     bat = readBat() * 100;
 
+    bool gpsGood = false;
+
     unsigned long previousMillis = millis();
 
     while((previousMillis + 1000) > millis())
     {
-        while (serial.available() )
+        /* while (serial.available() )
         {
             char data = serial.read();
             gps.encode(data);
-        }
+        } */
+        gpsGood = gps.ready();
+        
     }
+    log_d_ln(gpsGood);
+    log_d_ln(gps.fixType);
+    log_d_ln(gps.numSV);
 
-    if (gps.location.isValid() && 
+    /* if (gps.location.isValid() && 
       gps.location.age() < 2000 &&
       gps.hdop.isValid() &&
       gps.hdop.value() <= 300 &&
       gps.hdop.age() < 2000 &&
       gps.altitude.isValid() && 
-      gps.altitude.age() < 2000 )
-    //if (gps.location.isValid())
+      gps.altitude.age() < 2000 ) */
+    if (gpsGood && (gps.fixType != 0) )
     {
-      double lat = gps.location.lat();
+      /* double lat = gps.location.lat();
       double lon = gps.location.lng();
       double alt = gps.altitude.meters();
       double kmph = gps.speed.kmph();
-      uint32_t sats = gps.satellites.value();
+      uint32_t sats = gps.satellites.value(); */
+
+      double lat = gps.lat / 10000000.0;
+      double lon = gps.lon / 10000000.0;
+      double alt = gps.hMSL / 1000.0;
+      double kmph = gps.gSpeed * 0.0036;
+      uint32_t sats = gps.numSV;
 
       byte buffer[24];
       buffer[0] = 0x00;
@@ -744,7 +759,8 @@ void onEvent(ev_t ev)
       {
         log_d_ln(F("> Got NO ack"));
       }
-      nextPacketTime = (gps.speed.kmph() > MOVING_KMPH ? SHORT_TX_INTERVAL : TX_INTERVAL); // depend on current GPS speed
+      //nextPacketTime = (gps.speed.kmph() > MOVING_KMPH ? SHORT_TX_INTERVAL : TX_INTERVAL); // depend on current GPS speed
+      nextPacketTime = ( (gps.gSpeed * 0.0036) > MOVING_KMPH ? SHORT_TX_INTERVAL : TX_INTERVAL); // depend on current GPS speed
       os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(nextPacketTime), do_send);
       log_d(F("Next in "));
       log_d(nextPacketTime);
@@ -793,12 +809,14 @@ void setup()
     delay(100); // per sample code on RF_95 test
   }
   
-  serial.begin(GPSBaud);
+  //serial.begin(GPSBaud);
   
-  serial.setTimeout(2);
+  //serial.setTimeout(2);
 
-  byte CFG_RST[12] = {0xb5, 0x62, 0x06, 0x04, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0F, 0x66};
-  serial.write(CFG_RST, sizeof(CFG_RST)); // Soft Reset GPS on Start
+  //byte CFG_RST[12] = {0xb5, 0x62, 0x06, 0x04, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x0F, 0x66};
+  //serial.write(CFG_RST, sizeof(CFG_RST)); // Soft Reset GPS on Start
+
+  gps.begin(GPSBaud);
 
   log_d(F("\n= Starting LoRaProMini v"));
   log_d(VERSION_MAJOR);
