@@ -517,14 +517,19 @@ void do_send(osjob_t *j)
 
     unsigned long previousMillis = millis();
 
-    while((previousMillis + 1000) > millis())
+    while ((previousMillis + 1000) > millis())
     {
         while (serial.available() )
         {
             char data = serial.read();
             gps.encode(data);
+            log_d(data);
         }
     }
+
+    log_d_ln("");
+    log_d_ln("Satellites found: ");
+    log_d_ln(gps.satellites.value());
 
     if (gps.location.isValid() && 
       gps.location.age() < 2000 &&
